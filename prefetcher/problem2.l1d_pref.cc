@@ -68,29 +68,63 @@ void CACHE::l1d_prefetcher_initialize() {
 //
 // Timeliness is the percentage of useful prefetches that are timely (arrive
 // before use). Track two values:
-// 1. The number of useful prefetches. TODO
-// 2. The number of timely prefetches. TODO
+// 1. The number of useful prefetches. Maintain buffer of issued prefetches. On
+// cache access, increment if accessed cache line is in buffer.
+// 2. The number of timely prefetches. On cache access, increment if accessed
+// cache line was prefetched.
 //
 // Accuracy is the percentage of useful prefetches. Track two values:
-// 1. The number of useful prefetches. TODO
-// 2. The number of prefetches. TODO
+// 1. The number of useful prefetches. See above.
+// 2. The number of prefetches. On prefetch issue, increment.
 //
-// Coverage is the percentage of misses that are prefetched. Track two values:
-// 1. The number of misses. TODO.
-// 2. The number of misses that are prefetched. TODO.
+// Coverage is the percentage of potential misses that are avoided with
+// prefetching. Track two values:
+// 1. The number of misses. On cache miss, increment.
+// 2. The number of misses avoided via prefetching. Maintain buffer of issued
+// prefetches. On cache access, increment if accessed cache line is in buffer.
 //
 // Instructions per access is the average number of cycles per cache
 // access. Track two values:
-// 1. The number of cycles. TODO
-// 2. The number of cache accesses. TODO
+// 1. The number of cycles. On cycle, increment.
+// 2. The number of cache accesses. On cache access, increment.
 //
 // Access coverage is the percentage of accesses that are prefetched. Track two
 // values:
-// 1. The number of accesses. TODO.
-// 2. The number of prefetched accesses. TODO.
+// 1. The number of accesses. On cache access, increment.
+// 2. The number of prefetched accesses. Maintain buffer of issued prefetches.
+// On cache access, increment if in buffer.
+//
+// Pollution is the percentage of demand misses caused by the prefetcher. Track
+// two values:
+// 1. The number of demand misses. On cache miss, increment.
+// 2. The number of demand misses due to the prefetcher. Maintain a Bloom
+// filter. On cache fill, set the bit corresponding to the evicted address to 1
+// if the filled address was prefetched. Otherwise, set the bit to 0. The number
+// of demand misses is the total number of 1s.
+// we really would like to know if the evicted address was prefetched. if it
+// was, it shouldn't count evict pre, fill pre: evicted a prefetched for a
+// prefetched (don't care) evict, fill pre: evicted a normal for a prefetched
+// (bad if normal hit again) evict pre, fill: evicted a prefetched for a normal
+// (don't care) evict, fill: evicted a normal for a normal (don't care)
+//
+// we know if the fill is a prefetch or not
+// we dont know if the evict is a prefetch or not
+// suppose we did
+//
+// idek....
 
 // Do not prefetch writes?. we want to focus on minimizing load misses
 // writes are buffered already
+//
+// need to track stream direction (up or down)
+// need to factor by stream (on IP or by block?)
+//
+// high acc: late -> increase, not late -> decrease/nothing
+// med acc: late -> increase
+// low acc: decrease
+//
+// distance should be exponential?
+//
 
 void CACHE::l1d_prefetcher_operate(uint64_t addr, uint64_t ip,
                                    uint8_t cache_hit, uint8_t type) {
