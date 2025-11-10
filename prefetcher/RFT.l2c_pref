@@ -1,0 +1,619 @@
+#include "cache.h"
+
+// #define DEBUG    // uncomment to print debug info to stdout
+
+/////////////////////////////////////////////////////
+// Macros & Definitions
+/////////////////////////////////////////////////////
+#define MASK(x, n)              (x & ((1 << n) - 1))
+#define COUNT_DECREMENT(x)      ((x > 0) ? (x - 1) : (0))
+#define UNSIGNED_SUBTRACT(x, y) ((x > y) ? (x - y) : ((-1) * (y - x)))
+
+#define LOG2_REGION_SIZE        (6)
+
+#define GET_PAGE(addr)          (addr >> LOG2_PAGE_SIZE)
+#define GET_PAGE_OFFSET(addr)   ((MASK(addr, LOG2_PAGE_SIZE)) >> LOG2_BLOCK_SIZE)
+#define GET_REGION(addr)        (GET_PAGE(addr) >> LOG2_REGION_SIZE)
+
+#ifdef  DEBUG
+#define DEBUG_MSG(x)            x
+#else
+#define DEBUG_MSG(x)
+#endif
+
+/////////////////////////////////////////////////////
+// Prefetcher Parameters
+/////////////////////////////////////////////////////
+#define RFT_TAG_BITS            (7)
+#define WARMUP_CYCLES           (4)
+#define PF_THRESHOLD            (16)
+#define PFF_BITS                (5)
+#define DAF_BITS                (5)
+#define PE_BITS                 (7)
+
+/////////////////////////////////////////////////////
+// RFT Debug Statistics
+/////////////////////////////////////////////////////
+static uint64_t RFT_ACCESS;           // Number of Accesses to Region Footprint Table (RFT)
+static uint64_t RFT_HITS;             // Number of Hits to Region Footprint Table
+static uint64_t RFT_DEMAND_HIT;       // Number of Demand Accesses found in Prefetch Filter (PFF)
+static uint64_t RFT_DEMAND_ACCESS;    // Number of (filtered) Demand Accesses (DAF is used to filter)
+static uint64_t TOTAL_PREFETCHES;     // Number of Prefetches Requested
+static uint64_t PREFETCH_EVENTS;      // Number of Times a Footprint is Prefetched
+
+/////////////////////////////////////////////////////
+// Prefetch Filter (PFF)
+/////////////////////////////////////////////////////
+#define PFF_SIZE                (1 << PFF_BITS)
+
+typedef class _pff
+{
+    private:
+    uint64_t tag[PFF_SIZE];
+    uint64_t tail;
+
+    public:
+    _pff(void)
+    {
+        uint32_t index;
+
+        for(index = 0; index < PFF_SIZE; index++)
+        {
+            tag[index] = 0;
+        }
+
+        tail = 0;
+    }
+
+    /**
+     * Return true if Page is found in Buffer
+     *
+     * @param addr - Full Address to Check
+     */
+    uint8_t contains(uint64_t addr)
+    {
+        uint32_t index;
+        uint64_t page;
+
+        page = GET_PAGE(addr);
+
+        for(index = 0; index < PFF_SIZE; index++)
+        {
+            if(tag[index] == page)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /**
+     * Insert Page into Buffer. Does not Check if Page is already
+     * in Buffer.
+     *
+     * @param addr - Full Address to Insert
+     */
+    uint8_t insert(uint64_t addr)
+    {
+        uint64_t page;
+
+        assert(tail < PFF_SIZE);
+
+        page = GET_PAGE(addr);
+
+        tag[tail] = (addr >> LOG2_PAGE_SIZE);
+        tail = (tail+1) % PFF_SIZE;
+
+        return true;
+    }
+
+} PrefetchFilter;
+
+/////////////////////////////////////////////////////
+// Demand Access Filter (DAF)
+/////////////////////////////////////////////////////
+#define DAF_SIZE                (1 << DAF_BITS)
+
+typedef class _daf
+{
+    private:
+    uint64_t tag[DAF_SIZE];
+    uint64_t tail;
+
+    public:
+    _daf(void)
+    {
+        uint32_t index;
+
+        for(index = 0; index < DAF_SIZE; index++)
+        {
+            tag[index] = 0;
+        }
+
+        tail = 0;
+    }
+
+    uint8_t contains(uint64_t addr)
+    {
+        uint32_t index;
+
+        for(index = 0; index < DAF_SIZE; index++)
+        {
+            if(tag[index] == (addr >> LOG2_BLOCK_SIZE))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    uint8_t insert(uint64_t addr)
+    {
+        assert(tail < DAF_SIZE);
+
+        if(this->contains(addr))
+        {
+            return false;
+        }
+
+        tag[tail] = (addr >> LOG2_BLOCK_SIZE);
+        tail = (tail+1) % DAF_SIZE;
+
+        return true;
+    }
+
+} DemandAccessFilter;
+
+/////////////////////////////////////////////////////
+// Prefetch Engine (PE)
+/////////////////////////////////////////////////////
+#define PE_SIZE                 (1 << PE_BITS)
+
+typedef class _pe
+{
+    private:
+    uint64_t base_addr[PE_SIZE];
+    uint64_t pf_addr[PE_SIZE];
+    uint64_t valid[PE_SIZE];
+    uint64_t tail;
+    uint64_t head;
+
+    public:
+    _pe(void)
+    {
+        uint32_t index;
+
+        for(index = 0; index < PE_SIZE; index++)
+        {
+            base_addr[index] = 0;
+            pf_addr[index] = 0;
+            valid[index] = 0;
+        }
+
+        head = 0;
+        tail = 0;
+    }
+
+    uint8_t contains(uint64_t addr)
+    {
+        uint32_t index;
+
+        for(index = 0; index < PE_SIZE; index++)
+        {
+            if(pf_addr[index] == addr)
+            {
+                return (true);
+            }
+        }
+
+        return (false);
+    }
+
+    uint8_t insert(uint64_t addr, uint64_t prefetch_addr)
+    {
+        assert(addr > 0);
+
+        if( (this->contains(addr)) || (tail == (head-1)) )
+        {
+            return (false);
+        }
+
+        base_addr[tail] = addr;
+        pf_addr[tail] = prefetch_addr;
+        valid[tail] = 1;
+        tail = (tail+1) % PE_SIZE;
+
+        return (true);
+    }
+
+    uint8_t prefetch(CACHE* cache)
+    {
+        uint64_t mshr_open;
+
+        mshr_open = cache->MSHR.SIZE - cache->MSHR.occupancy;
+
+        while( (mshr_open > 0) && (valid[head] != 0) )
+        {
+            cache->prefetch_line(0, base_addr[head], pf_addr[head], FILL_L2, 0);
+            valid[head] = 0;
+            head = (head+1) % PE_SIZE;
+            mshr_open = (mshr_open > 0) ? (mshr_open-1) : (0);
+        }
+
+        return (true);
+    }
+} PrefetchEngine;
+
+/////////////////////////////////////////////////////
+// Region Footprint Table (RFT)
+/////////////////////////////////////////////////////
+#define RFT_SIZE                (1 << RFT_TAG_BITS)
+
+typedef class _rft
+{
+    private:
+    uint64_t tag[RFT_SIZE];         // Region [(Phys. Addr Bits - 18) = (48 - 18) = 30 Bits]
+    uint64_t last_page[RFT_SIZE];   // Last Page Accessed within Region [(Phys. Addr Bits - 12) = (48 - 12) = 36 Bits] -- Can be Reduced to 18 Bits
+    uint64_t first_time[RFT_SIZE];  // Counter (for Warmup Period) [64 Bits]
+    uint64_t footprint[RFT_SIZE];   // Footprint for Page   [64 Bits]
+    uint64_t lru[RFT_SIZE];         // Least Recently Used  [RFT_TAG_BITS = 10 Bits]
+                                    // Hardware Budget = (30 + 36 + 64 + 64 + 10) * 1024 = 26.112 KB
+
+    uint8_t lru_get_victim(uint32_t* victim)
+    {
+        uint32_t index;
+        uint32_t lru_index;
+
+        lru_index = 0;
+        for(index = 0; index < RFT_SIZE; index++)
+        {
+            if(lru[index] > lru[lru_index])
+            {
+                lru_index = index;
+            }
+        }
+
+        assert(lru_index < RFT_SIZE);
+        *(victim) = lru_index;
+
+        return (true);
+    }
+
+    uint8_t lru_update(uint32_t mru)
+    {
+        uint32_t index;
+
+        assert(mru < RFT_SIZE);
+
+        for(index = 0; index < RFT_SIZE; index++)
+        {
+            if(lru[index] < lru[mru])
+            {
+                lru[index] += 1;
+            }
+        }
+        lru[mru] = 0;
+
+        return (true);
+    }
+
+    uint8_t insert(uint64_t addr, uint64_t timer)
+    {
+        uint32_t evict_index;
+
+        assert(addr != 0);
+
+        if(! lru_get_victim(&evict_index) )
+        {
+            return false;
+        }
+
+        assert(evict_index < RFT_SIZE);
+        assert(GET_PAGE_OFFSET(addr) < 64);
+
+        tag[evict_index] = GET_REGION(addr);
+        last_page[evict_index] = GET_PAGE(addr);
+        first_time[evict_index] = timer;
+        footprint[evict_index] = ((uint64_t)0x01) << GET_PAGE_OFFSET(addr);
+        lru_update(evict_index);
+
+        return (true);
+    }
+
+    uint8_t find(uint64_t addr, uint32_t* entry)
+    {
+        uint32_t index;
+
+        for(index = 0; index < RFT_SIZE; index++)
+        {
+            if(tag[index] == GET_REGION(addr))
+            {
+                if(entry)
+                {
+                    *(entry) = index;
+                }
+                return (true);
+            }
+        }
+
+        return (false);
+    }
+
+    public:
+    static uint64_t GET_BITS_SET(uint64_t footprint)
+    {
+        uint64_t num_set;
+
+        num_set = 0;
+        while(footprint)
+        {
+            if(footprint & 0x01)
+            {
+                num_set++;
+            }
+
+            footprint = footprint >> 1;
+        }
+
+        return num_set;
+    }
+
+    _rft(void)
+    {
+        uint32_t index;
+
+        for(index = 0; index < RFT_SIZE; index++)
+        {
+            tag[index] = 0;
+            last_page[index] = 0;
+            first_time[index] = 0;
+            footprint[index] = 0;
+            lru[index] = index;
+        }
+    }
+
+    uint8_t update(uint64_t addr, uint64_t timer)
+    {
+        uint32_t index;
+        uint64_t new_offset;
+
+        if(! find(addr, &index) )
+        {
+            // New Region
+            this->insert(addr, timer);
+            return (false);
+        }
+        else
+        {
+            // Matching Region
+            new_offset = GET_PAGE_OFFSET(addr);
+
+            assert(new_offset < 64);
+            assert(index < RFT_SIZE);
+
+            footprint[index] |= (((uint64_t)0x01) << new_offset);
+            last_page[index] = GET_PAGE(addr);
+            lru_update(index);
+
+            return (true);
+        }
+    }
+
+    uint8_t read(uint64_t addr, uint64_t* footprint, uint64_t* warmup_remaining, uint64_t* last_page)
+    {
+        uint32_t index;
+
+        RFT_ACCESS++;
+
+        if(! find(addr, &index) )
+        {
+            // No Matching Region
+            return (false);
+        }
+        else
+        {
+            assert(index < RFT_SIZE);
+
+            RFT_HITS++;
+
+            *(footprint) = this->footprint[index];
+            *(warmup_remaining) = this->first_time[index];
+            *(last_page) = this->last_page[index];
+
+            return (true);
+        }
+    }
+
+} RegionFootprintTable;         // Fully Associative LRU
+
+/////////////////////////////////////////////////////
+// Hardware, Registers, & Counters
+/////////////////////////////////////////////////////
+static RegionFootprintTable RFT;
+static PrefetchFilter       PFF;
+static DemandAccessFilter   DAF;
+static PrefetchEngine       PE;
+
+static uint64_t             TIMER;
+
+/////////////////////////////////////////////////////
+// RFT Interface
+/////////////////////////////////////////////////////
+static uint8_t rft_initialize(void)
+{
+    RFT_ACCESS = 0;
+    RFT_HITS = 0;
+    RFT_DEMAND_HIT = 0;
+    RFT_DEMAND_ACCESS = 0;
+    TOTAL_PREFETCHES = 0;
+    PREFETCH_EVENTS = 0;
+
+    TIMER = 0;
+
+    // Print Out Configuration
+    cout << "///////////////////////////////////////" << endl;
+    cout << "RFT Prefetcher Configuration" << endl;
+    cout << "\tRFT Entries:\t" << RFT_SIZE << endl;
+    cout << "\tPFF Entries:\t" << PFF_SIZE << endl;
+    cout << "\tDAF Entries:\t" << DAF_SIZE << endl;
+    cout << "\tPE Entries:\t" << PE_SIZE << endl;
+    cout << "\tPF Threshold:\t" << PF_THRESHOLD << endl;
+    cout << "\tWarmup Cycles:\t" << WARMUP_CYCLES << endl;
+    cout << "///////////////////////////////////////" << endl;
+
+    return (true);
+}
+
+static uint8_t rft_prefetch(CACHE* cache, uint64_t base_addr, uint64_t footprint)
+{
+    uint64_t pf_addr;
+    uint32_t index;
+
+    if( RegionFootprintTable::GET_BITS_SET(footprint) > PF_THRESHOLD )
+    {
+        return (false);
+    }
+
+    PREFETCH_EVENTS++;
+
+    index = 0;
+    while(footprint)
+    {
+        if(footprint & 0x01)
+        {
+            assert(index < 64);
+            pf_addr = (((GET_PAGE(base_addr) << LOG2_REGION_SIZE) + index) << LOG2_BLOCK_SIZE);
+
+            if( ((pf_addr >> LOG2_BLOCK_SIZE) != (base_addr >> LOG2_BLOCK_SIZE)) && (!PFF.contains(pf_addr)) )
+            {
+                PE.insert(base_addr, pf_addr);
+                PFF.insert(pf_addr);
+                TOTAL_PREFETCHES++;
+            }
+        }
+        
+        index++;
+        footprint = footprint >> 1;
+    }
+
+    return (true);
+}
+
+static uint8_t rft_operate(CACHE* cache, uint64_t addr)
+{
+    uint64_t footprint;
+    uint64_t warmup;
+    uint64_t last_page;
+    uint8_t  b_found;
+    uint8_t  b_prefetch;
+
+    b_prefetch = false;
+
+    // Get RFT Entry
+    b_found = RFT.read(addr, &footprint, &warmup, &last_page);
+
+    // Prefetch Page Offsets
+    if( (b_found) && (last_page != GET_PAGE(addr)) && ((TIMER - warmup) > WARMUP_CYCLES) )
+    {
+        // Prefetch (if necessary conditions are met)
+        b_prefetch = rft_prefetch(cache, addr, footprint);
+    }
+    
+    // Update RFT
+    RFT.update(addr, TIMER);
+
+    return (b_prefetch);
+}
+
+static uint8_t rft_final_stats(void)
+{
+    double avg_prefetches;
+    double acc;
+
+    avg_prefetches = ((double)TOTAL_PREFETCHES) / ((double)PREFETCH_EVENTS);
+    acc = ((double)RFT_DEMAND_HIT) / ((double)RFT_DEMAND_ACCESS);
+
+    cout << "///////////////////////////////////////" << endl;
+    cout << "RFT Final Stats **" << endl;
+    cout << "\tRFT Demand Access: " << RFT_DEMAND_ACCESS << "\tRFT Demand Hits: " << RFT_DEMAND_HIT << "\tRFT Accuracy: " << acc << endl;
+    cout << "\tTotal Prefetches: " << TOTAL_PREFETCHES << "\tPrefetch Events: " << PREFETCH_EVENTS << "\tAvgerage Prefetches per Event: " << avg_prefetches << endl;
+    cout << "///////////////////////////////////////" << endl;
+
+    return (true);
+}
+
+/////////////////////////////////////////////////////
+// Next Line Prefetch
+/////////////////////////////////////////////////////
+static uint8_t nl_prefetch(CACHE* cache, uint64_t addr)
+{
+    uint64_t pf_addr;
+
+    pf_addr = ((addr >> LOG2_BLOCK_SIZE) + 1) << LOG2_BLOCK_SIZE;
+    PE.insert(addr, pf_addr);
+
+    return (true);
+}
+
+/////////////////////////////////////////////////////
+// DPC-3 Interface
+/////////////////////////////////////////////////////
+void CACHE::l2c_prefetcher_initialize(void) 
+{
+    // Initialize RFT Prefetcher
+    rft_initialize();
+}
+
+uint32_t CACHE::l2c_prefetcher_operate(uint64_t addr, uint64_t ip, uint8_t cache_hit, uint8_t type, uint32_t metadata_in) 
+{
+    if(type != LOAD)
+    {
+        return metadata_in;
+    }
+
+    // Increment Total Number of Demand Accesses (used for warmup period)
+    TIMER++;
+
+    PE.prefetch(this);
+
+    // Ignore recently Seen Block Addresses
+    if(!DAF.insert(addr))
+    {
+        // Returns False if Block Address already in Filter
+        return metadata_in;
+    }
+
+    // Increment Unique Number of Demand Accesses
+    RFT_DEMAND_ACCESS++;
+    if(RFT_DEMAND_ACCESS % 100 == 0)
+    {
+        DEBUG_MSG(cout << "Demand Accesses: " << RFT_DEMAND_ACCESS << "\tPredictions: " << TOTAL_PREFETCHES << "\tDemand Hits: " << RFT_DEMAND_HIT << endl);
+    }
+
+    // Check if Demand Access was Recently Prefetched
+    if(PFF.contains(addr))
+    {
+        RFT_DEMAND_HIT++;
+    }
+
+    // RFT Mechanism
+    if(! rft_operate(this, addr) )
+    {
+        nl_prefetch(this, addr); // Use Next Line if Bits in BitVector > PF_THRESHOLD
+    }
+
+    return metadata_in;
+}
+
+uint32_t CACHE::l2c_prefetcher_cache_fill(uint64_t addr, uint32_t set, uint32_t way, uint8_t prefetch, uint64_t evicted_addr, uint32_t metadata_in) 
+{
+    return metadata_in;
+}
+
+void CACHE::l2c_prefetcher_final_stats(void) 
+{
+    // Output RFT Prefetcher Stats
+    rft_final_stats();
+}
