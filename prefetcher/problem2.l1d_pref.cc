@@ -10,6 +10,76 @@
 // within last 512 accesses, how many hits?
 //
 
+using u8 = uint8_t;
+using u16 = uint16_t;
+using u32 = uint32_t;
+using u64 = uint64_t;
+
+using i8 = int8_t;
+using i16 = int16_t;
+using i32 = int32_t;
+using i64 = int64_t;
+
+struct PrefetchStream {
+    // Stream eviction. Probably should not use LRU.
+    bool lru;  // LRU bit. Used to decide which stream to evict.
+
+    // Stream state.
+    u64 last_cache_line;  // Last cache line.
+    bool
+        direction;  // Whether the stream has increasing cache line addresses
+                    // or decreasing. Used to prefetch in the correct direction.
+
+    // Stream throttling.
+    u8 aggression;  // Stream aggression. Used to control the prefetcher degree
+                    // and distance.
+
+    u64 num_issued;  // Number of prefetches issued by stream within a time
+                     // interval.
+    u64 num_useful;  // Number of useful prefetches issued by stream within a
+                     // time interval. A prefetch is useful if the prefetched
+                     // line is accessed in cache regardless of whether the
+                     // prefetched line has made it to cache.
+    u64 num_timely;  // Number of timely prefetches issued by stream within a
+                     // time interval. A prefetch is timely if the prefetch line
+                     // is a cache hit.
+
+    // timeliness: timely / useful
+    // accuracy: useful / issued
+    //
+    //
+    // too far ahead, too many prefetched           : timely, not accurate
+    // too far ahead, just right prefetched         : timely, accurate
+    // too far ahead, too few prefetched            : timely, accurate
+    // just right distance, too many prefetched     : timely, not accurate
+    // just right distance, just right prefetched   : timely, accurate
+    // just right distance, too few prefetched      : timely, accurate
+    // too far behind, too many prefetched          : not timely, not accurate
+    // too far behind, just right prefetched        : not timely, accurate
+    // too far behind, too few prefetched           : not timely, accurate
+
+    // if not accurate, decrease degree
+    // if not timely, increase distance
+    // if accurate, increase degree (OK-ish if we have to revert)
+    // if timely, decrease distance (kind of bad if we have to revert)
+
+    // on-time and useful: increase degree
+    // on-time and not useful: not possible
+    // late and useful: increase distance
+    // late and not useful: decrease degree, increase? distance
+};
+
+struct PrefetchStreamCandidate {
+    // Candidate eviction.
+    bool lru;
+
+    // Candidate state.
+    u64 first_cache_line;     // First cache line.
+    i16 cache_line_delta[2];  // Offset of nearby cache line accesses relative
+                              // to the first cache line (within +-16 cache
+                              // lines). Used to train direction.
+};
+
 #define MAX_PREFETCH_BUF_SIZE 128
 #define INTERVAL 512
 #define THRESHOLD 16
