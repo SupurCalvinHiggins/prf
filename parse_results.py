@@ -1,14 +1,14 @@
-import sys
 import re
+import sys
 
-RootDir = "/local/v0/sendag/dpc3/ChampSim" # CHANGE THIS TO YOUR CHAMPSIM DIRECTORY
-ScriptDir = "/local/v0/dpc3_traces"
-ResultsDir = RootDir + "/results" # change this to your results directory
+RootDir = "/home/calvin/Documents/uri/ele548/hw3/dpc3/ChampSim"  # CHANGE THIS TO YOUR CHAMPSIM DIRECTORY
+ScriptDir = "/home/calvin/Documents/uri/ele548/hw3/dpc3/dpc3_traces"
+ResultsDir = RootDir + "/results"  # change this to your results directory
 
 # Put Benchmark Traces into Array
 TraceDir = ScriptDir
 TraceFileName = "dpc3_all_simpoint.txt"
-#TraceFileName = "dpc3_mcf_simpoint.txt"
+# TraceFileName = "dpc3_mcf_simpoint.txt"
 TracesFile = open(TraceDir + "/" + TraceFileName, "r")
 Traces = TracesFile.read().splitlines()
 TracesFile.close()
@@ -23,7 +23,7 @@ IPC_OutputFile.write("Benchmark")
 i = 1
 while i <= NumPrefetchers:
     IPC_OutputFile.write("," + sys.argv[i])
-    i = i+1
+    i = i + 1
 IPC_OutputFile.write("\n")
 
 for Trace in Traces:
@@ -33,7 +33,7 @@ for Trace in Traces:
     i = 1
     while i <= NumPrefetchers:
         Prefetcher = sys.argv[i]
-        ResultFileName = ResultsDir  + "/" + Prefetcher + "-" + Trace + ".txt"
+        ResultFileName = ResultsDir + "/" + Prefetcher + "-" + Trace + ".txt"
         ResultFile = open(ResultFileName, "r")
 
         # Get IPC for this Prefetcher Config
@@ -43,7 +43,7 @@ for Trace in Traces:
             if ipc_check:
                 ipc_match = re.findall("\d.\d+", line)
                 IPC = float(ipc_match[0])
-                break;
+                break
 
         # Output Results to Respective Files
         IPC_OutputFile.write("," + str(IPC))
@@ -57,4 +57,3 @@ for Trace in Traces:
     IPC_OutputFile.write("\n")
 
 IPC_OutputFile.close()
-
