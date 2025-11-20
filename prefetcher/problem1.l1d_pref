@@ -50,13 +50,14 @@ void CACHE::l1d_prefetcher_operate(uint64_t addr, uint64_t ip,
         m_useful = 0;
     }
 
-    // Do not repeat recent prefetches.
-    if (is_issued) return;
-
     // Compute the prefetch address.
     uint64_t offset = m_distance == 0 ? 0 : 1 << (m_distance - 1);
     uint64_t pf_cache_line = cache_line + 1 + offset;
     uint64_t pf_addr = pf_cache_line << LOG2_BLOCK_SIZE;
+
+    // Do not repeat recent prefetches.
+    bool pf_is_issued = m_issued.count(pf_cache_line);
+    if (pf_is_issued) return;
 
     // Maintain queue of prefetched cache lines.
     m_issued.insert(pf_cache_line);
