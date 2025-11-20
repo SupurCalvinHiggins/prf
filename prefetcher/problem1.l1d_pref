@@ -7,9 +7,7 @@
 
 using namespace cnt;
 
-#define MAX_PREFETCH_BUF_SIZE 128
-#define INTERVAL 512
-#define THRESHOLD 16
+#define ISSUED_QUEUE_SIZE 128
 
 // The prefetcher distance. The cache line offset is computed as floor(2^{d-1}).
 saturating_counter<0, 7> m_distance{0};
@@ -21,12 +19,12 @@ std::queue<uint16_t> m_issued_queue;
 
 // Number of useful prefetches within a given interval. A prefetch is useful if
 // the cache line is accessed after the prefetch.
-saturating_counter<0, 15> m_useful{0};
+saturating_counter<0, THRESHOLD> m_useful{0};
 saturating_counter<0, 511> m_access{0};
 
 void CACHE::l1d_prefetcher_initialize() {
     cout << "CPU " << cpu << " L1D next line prefetcher" << endl;
-    m_issued.reserve(MAX_PREFETCH_BUF_SIZE);
+    m_issued.reserve(ISSUED_QUEUE_SIZE);
 }
 
 void CACHE::l1d_prefetcher_operate(uint64_t addr, uint64_t ip,
@@ -63,7 +61,7 @@ void CACHE::l1d_prefetcher_operate(uint64_t addr, uint64_t ip,
     // Maintain queue of prefetched cache lines.
     m_issued.insert(pf_cache_line);
     m_issued_queue.push(pf_cache_line);
-    if (m_issued_queue.size() > MAX_PREFETCH_BUF_SIZE) {
+    if (m_issued_queue.size() > ISSUED_QUEUE_SIZE) {
         m_issued.erase(m_issued_queue.front());
         m_issued_queue.pop();
     }
