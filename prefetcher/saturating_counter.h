@@ -6,7 +6,7 @@
 
 namespace cnt {
 
-template <int16_t min, int16_t max>
+template <int16_t Min, int16_t Max>
 class saturating_counter {
    public:
     using value_type = int16_t;
@@ -15,27 +15,27 @@ class saturating_counter {
     value_type m_value;
 
     inline static value_type sat(const value_type value) noexcept {
-        if (value < min) return min;
-        if (value > max) return max;
+        if (value < Min) return Min;
+        if (value > Max) return Max;
         return value;
     }
 
     inline static value_type add_sat(const value_type a,
                                      const value_type b) noexcept {
-        assert(min <= a && a <= max);
-        assert(min <= b && b <= max);
+        assert(Min <= a && a <= Max);
+        assert(Min <= b && b <= Max);
 
         value_type result;
-        if (__builtin_add_overflow(a, b, &result)) return a > 0 ? max : min;
+        if (__builtin_add_overflow(a, b, &result)) return a > 0 ? Max : Min;
         return sat(result);
     }
 
     inline static value_type sub_sat(const value_type a,
                                      const value_type b) noexcept {
-        assert(min <= a && a <= max);
-        assert(min <= b && b <= max);
+        assert(Min <= a && a <= Max);
+        assert(Min <= b && b <= Max);
         value_type result;
-        if (__builtin_sub_overflow(a, b, &result)) return a > 0 ? max : min;
+        if (__builtin_sub_overflow(a, b, &result)) return a > 0 ? Max : Min;
         return sat(result);
     }
 
@@ -46,6 +46,9 @@ class saturating_counter {
 
     [[nodiscard]] operator value_type() const noexcept { return m_value; }
     [[nodiscard]] value_type value() const noexcept { return m_value; }
+
+    [[nodiscard]] static value_type max() noexcept { return Max; }
+    [[nodiscard]] static value_type min() noexcept { return Max; }
 
     saturating_counter& operator+=(value_type value) noexcept {
         m_value = add_sat(m_value, value);
