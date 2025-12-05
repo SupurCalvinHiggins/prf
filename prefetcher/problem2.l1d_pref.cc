@@ -85,7 +85,13 @@ using i64 = int64_t;
 // if the filled address was prefetched. Otherwise, set the bit to 0. The number
 // of demand misses is the total number of 1s.
 
-saturating_counter<0, 511> num_access{0};
+// When timeliness is below this value, increase distance.
+#define TIMELINESS_BOOST_THRESHOLD 0.4
+
+// When accuracy is above this value, increase degree.
+#define ACCURACY_BOOST_THRESHOLD 0.8
+// When accuracy is below this value, decrease degree and distance.
+#define ACCURACY_THROTTLE_THRESHOLD 0.4
 
 template <typename T>
 class Optional {
@@ -103,9 +109,12 @@ class Optional {
 };
 
 struct Hint {
-    u64 last_cache_line;
+    u64 cache_line;
     bool direction;
-    bool strong;
+    bool useful;
+
+    Hint(u64 cache_line, bool direction, bool useful)
+        : cache_line(cache_line), direction(direction), useful(useful) {}
 };
 
 template <std::size_t N>
@@ -150,7 +159,7 @@ class Streams {
     std::array<saturating_counter<0, 2>, N>
         m_degree;  // Prefetcher degree. Real values are 1, 2 and 4.
 
-    // TODO: comment these
+    // TODO: Comment.
     IssueQueue m_issued;
 
     std::array<saturating_counter<0, 511>, N>
@@ -167,18 +176,13 @@ class Streams {
                        // time interval. A prefetch is timely if the prefetch
                        // line is a cache hit.
 
+    // TODO: Comment.
+    saturating_counter<0, 511> m_num_access{0};
+
     // mark a stream as deallocated
     void deallocate(Stream stream) {
-        m_useful[stream] = 0;
         m_allocated[stream] = false;
-        m_last_cache_line[stream] = 0;
-        m_direction[stream] = 0;
-        m_distance[stream] = 0;
-        m_degree[stream] = 0;
         m_issued.invalidate(stream);
-        m_num_issued[stream] = 0;
-        m_num_useful[stream] = 0;
-        m_num_timely[stream] = 0;
     }
 
     // allocate a stream with cache line and direction
@@ -194,17 +198,28 @@ class Streams {
             stream = std::distance(m_useful.begin(), deallocate_it);
             deallocate(stream);
         }
+
+        assert(!m_allocated[stream]);
+        m_useful[stream] = 0;
         m_allocated[stream] = 0;
         m_useful[stream] = 1;
+        m_last_cache_line[stream] = 0;
         m_direction[stream] = direction;
+        m_distance[stream] = 0;
+        m_degree[stream] = 0;
         m_last_cache_line[stream] = cache_line;
+        m_num_issued[stream] = 0;
+        m_num_useful[stream] = 0;
+        m_num_timely[stream] = 0;
+
         return stream;
     }
 
     // find a stream with cache line and direction, allocating if needed
     Stream find_or_allocate(u64 cache_line, bool direction) {
         auto stream = m_issued.find(cache_line);
-        if (stream.has_value() && m_direction[stream.value()] == direction)
+        if (stream.has_value() && m_allocated[stream.value()] &&
+            m_direction[stream.value()] == direction)
             return stream.value();
         return allocate(cache_line, direction);
     }
@@ -245,11 +260,43 @@ class Streams {
         prefetch(stream, cache_line);
     }
 
-    // Update streams on period end. TODO
-    void train() {}
-};
+    void train() {
+        ++m_num_access;
+        if (m_num_access != m_num_access.max()) return;
 
-struct StreamCandidate {};
+        m_num_access = 0;
+        for (Stream stream = 0; stream < N; ++stream) {
+            auto& num_useful = m_num_useful[stream];
+            auto& num_timely = m_num_timely[stream];
+            auto& num_issued = m_num_issued[stream];
+            double timeliness =
+                num_useful != 0 ? (double)num_timely / num_useful : 0.0;
+            double accuracy =
+                num_issued != 0 ? (double)num_useful / num_issued : 0.0;
+
+            if (timeliness <= TIMELINESS_BOOST_THRESHOLD) ++m_distance[stream];
+
+            if (accuracy <= ACCURACY_THROTTLE_THRESHOLD) {
+                --m_degree[stream];
+                --m_distance[stream];
+            } else if (accuracy >= ACCURACY_BOOST_THRESHOLD) {
+                ++m_degree[stream];
+            }
+
+            if (accuracy >= ACCURACY_THROTTLE_THRESHOLD &&
+                num_useful >= m_num_access.max() / (2 * N)) {
+                ++m_useful[stream];
+            } else {
+                --m_useful[stream];
+            }
+
+            // TODO: Should we use the issue queue to maintain these?
+            num_useful = 0;
+            num_timely = 0;
+            num_issued = 0;
+        }
+    }
+};
 
 template <std::size_t N>
 class Candidates {
@@ -268,11 +315,17 @@ class Candidates {
     std::array<saturating_counter<0, 3>, N>
         m_num_correct;  // Number of times the direction has been correct.
 
-    Optional<Candidate> find(u64 cache_line) {}
-
-    void dellocate(Candidate candidate) {
-        // TODO: dellocate
+    Optional<Candidate> find(u64 cache_line) {
+        for (Candidate candidate = 0; candidate < N; ++candidate)
+            if ((m_allocated[candidate] &&
+                 m_cache_line[candidate] != cache_line &&
+                 m_cache_line[candidate] - 16 <= cache_line &&
+                 cache_line <= m_cache_line[candidate] + 16))
+                return candidate;
+        return {};
     }
+
+    void deallocate(Candidate candidate) { m_allocated[candidate] = false; }
 
     Candidate allocate(u64 cache_line) {
         Candidate candidate;
@@ -280,9 +333,25 @@ class Candidates {
         if (it != m_allocated.end()) {
             candidate = std::distance(m_allocated.begin(), it);
         } else {
-            // TODO: evict something weak, do it.
+            // TODO: Randomize eviction.
+            auto deallocate_it = std::find(m_lru.begin(), m_lru.end(), 0);
+            if (deallocate_it != m_lru.end()) {
+                candidate = std::distance(m_lru.begin(), deallocate_it);
+            } else {
+                std::fill(m_lru.begin(), m_lru.end(), 0);
+                candidate = std::rand() % N;
+            }
+            m_allocated[candidate] = false;
         }
-        // TODO: allocate candidate
+
+        assert(m_allocated[candidate] == false);
+        m_allocated[candidate] = true;
+        m_lru[candidate] = true;
+        m_cache_line[candidate] = cache_line;
+        m_num_correct[candidate] = 0;
+        m_direction[candidate] = 0;
+
+        return candidate;
     }
 
     Candidate find_or_allocate(u64 cache_line) {
@@ -291,128 +360,90 @@ class Candidates {
         return allocate(cache_line);
     }
 
-    void train(Candidate candidate, u64 cache_line) {}
+    void train(Candidate candidate, u64 cache_line) {
+        // Touch the candidate
+        m_lru[candidate] = true;
+
+        // Compute the direction.
+        bool direction = cache_line > m_cache_line[candidate];
+
+        // If the candidate has no learned direction, set it.
+        if (m_num_correct[candidate] == 0) m_direction[candidate] = direction;
+
+        // TODO: this is not the right place for this
+        // If the direction does not match the learned direction,
+        // reallocate the candidate.
+        if (m_direction[candidate] != direction) {
+            deallocate(candidate);
+            allocate(cache_line);
+            return;
+        }
+
+        // Otherwise, the direction matches the learned direction.
+        ++m_num_correct[candidate];
+    }
 
    public:
+    // train candidate on cache line, return prefetch hint. if hint is strong,
+    // deallocate candidiate
     Hint train(u64 cache_line) {
         auto candidate = find_or_allocate(cache_line);
         train(candidate, cache_line);
-        // TODO: if candidate is strong, deallocate it, return strong hint.
+        bool useful =
+            m_num_correct[candidate] == m_num_correct[candidate].max();
+        auto hint =
+            Hint(m_cache_line[candidate], m_direction[candidate], useful);
+        if (useful) deallocate(candidate);
+        return hint;
     }
 };
 
 Streams<32> streams;
-std::array<StreamCandidate, 32> stream_candidates;
+Candidates<32> candidates;
 
 void CACHE::l1d_prefetcher_initialize() {
     cout << "CPU " << cpu << " L1D next line prefetcher" << endl;
 }
 
 // called when a tag is checked in the cache
-// this means (1) data is requested from cache, or (2) tag checked for coherence
-// address
-// instruction pointer
-// cache hit (y/n)
-// type (load, write, read for ownership, prefetch, translation)
+// this means (1) data is requested from cache, or (2) tag checked for
+// coherence address instruction pointer cache hit (y/n) type (load, write,
+// read for ownership, prefetch, translation)
 void CACHE::l1d_prefetcher_operate(uint64_t addr, uint64_t ip,
                                    uint8_t cache_hit, uint8_t type) {
-    // A cache line was accessed.
-    ++num_access;
     uint64_t cache_line = addr >> LOG2_BLOCK_SIZE;
 
-    // If there is an IP-based stream that prefetched the cache line already,
-    // update the stream metrics and issue additional prefetches from the
-    // stream.
+    // If there is an IP-based stream that prefetched the cache line
+    // already, update the stream metrics and issue additional prefetches
+    // from the stream.
     // TODO:
 
-    // If there is a stream that prefetched the cache line already, update the
-    // stream metrics and issue additional prefetches from the stream.
+    // If there is a stream that prefetched the cache line already, update
+    // the stream metrics and issue additional prefetches from the stream.
     auto is_prefetch = streams.prefetch(cache_line);
     if (is_prefetch) goto monitor;
 
-    // If there is an IP-based candidate that can train on the cache line, train
-    // it. If the candidate is fully trained, promote it to a full stream,
-    // update the stream and issue additional prefetches from the stream.
+    // If there is an IP-based candidate that can train on the cache line,
+    // train it. If the candidate is fully trained, promote it to a full
+    // stream, update the stream and issue additional prefetches from the
+    // stream.
     // TODO:
 
-    // If there is a candidate that can train on the cache line, train it. If
-    // the candiate is fully trained, promote it to a full stream, update the
-    // stream and issue additional prefetches from the stream.
-    // auto hint_or_allocate = canidates.train(cache_line)
-    // if hint_or_allocate is allocate: streams.allocate(opt_candidate);
-    // streams.prefetch(cache_line); otherwise use hint
-
-    for (auto& candidate : stream_candidates) {
-        // If there is a deallocated candidate, use it.
-    handle_deallocated:
-        if (!candidate.allocated) {
-            candidate.allocated = true;
-            candidate.lru = true;
-            candidate.cache_line = cache_line;
-            candidate.num_correct = 0;
-            candidate.direction = 0;
-            goto next_line_prefetch_forward;
-        }
-
-        // If there is a direction signal for the candidate, use it.
-        if ((candidate.cache_line != cache_line &&
-             candidate.cache_line - 16 <= cache_line &&
-             cache_line <= candidate.cache_line + 16)) {
-            // Touch the candidate.
-            candidate.lru = true;
-
-            // Compute the direction.
-            bool direction = cache_line > candidate.cache_line;
-
-            // If the candidate has no learned direction, set it.
-            if (candidate.num_correct == 0) candidate.direction = direction;
-
-            // If the direction does not match the learned direction, reallocate
-            // the candidate.
-            if (candidate.direction != direction) {
-                candidate.allocated = false;
-                goto handle_deallocated;
-            }
-
-            // Otherwise, the direction matches the learned direction.
-            ++candidate.num_correct;
-
-            // If the candidate cannot be promoted yet, use the learned
-            // direction as a hint to the next line prefetcher.
-            if (candidate.num_correct != candidate.num_correct.max()) {
-                if (direction) {
-                    goto next_line_prefetch_forward;
-                } else {
-                    goto next_line_prefetch_backward;
-                }
-            }
-
-            // TODO: Find a stream, allocate it.
-            // Use current cache line, direction.
-            streams.allocate_and_prefetch(cache_line, direction);
-        }
-
-        // TODO: handle LRU candidate
+    // If there is a candidate that can train on the cache line, train it.
+    // If the candiate is fully trained, promote it to a full stream, update
+    // the stream and issue additional prefetches from the stream. auto
+    auto hint = candidates.train(cache_line);
+    if (hint.useful) {
+        streams.allocate_and_prefetch(hint.cache_line, hint.direction);
+    } else {
+        auto direction = hint.direction ? 1 : -1;
+        auto pf_cache_line = cache_line + 16 * direction;
+        prefetch_line(ip, addr, pf_cache_line << LOG2_BLOCK_SIZE, FILL_L1, 0);
     }
-
-next_line_prefetch_forward:
-    // Fallback to a next-line prefetcher with distance 16.
-    prefetch_line(ip, addr, (cache_line + 1 + 16) << LOG2_BLOCK_SIZE, FILL_L1,
-                  0);
-    goto monitor;
-
-next_line_prefetch_backward:
-    // Fallback to a next-line prefetcher with distance 16.
-    prefetch_line(ip, addr, (cache_line - 1 - 16) << LOG2_BLOCK_SIZE, FILL_L1,
-                  0);
-    goto monitor;
 
 monitor:
     // If the monitoring period is over, update the streams.
-    if (num_access == num_access.max()) {
-        num_access = 0;
-        streams.train();
-    }
+    streams.train();
 }
 
 // called when a miss is filled in the cache
@@ -422,7 +453,9 @@ monitor:
 // evicted_addr addr of evicted block
 void CACHE::l1d_prefetcher_cache_fill(uint64_t addr, uint32_t set, uint32_t way,
                                       uint8_t prefetch, uint64_t evicted_addr,
-                                      uint32_t metadata_in) {}
+                                      uint32_t metadata_in) {
+    // TODO: need to mark cache line as timely
+}
 
 void CACHE::l1d_prefetcher_final_stats() {
     cout << "CPU " << cpu << " L1D next line prefetcher final stats" << endl;
