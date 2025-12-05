@@ -51,8 +51,8 @@ void CACHE::l1d_prefetcher_operate(uint64_t addr, uint64_t ip,
     }
 
     // Compute the prefetch address.
-    uint64_t offset = m_distance == 0 ? 0 : 1 << (m_distance - 1);
-    uint64_t pf_cache_line = cache_line + 1 + offset;
+    uint64_t offset = 1 << m_distance;
+    uint64_t pf_cache_line = cache_line + offset;
     uint64_t pf_addr = pf_cache_line << LOG2_BLOCK_SIZE;
 
     // Do not repeat recent prefetches.
