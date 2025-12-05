@@ -1,15 +1,13 @@
+#pragma once
+
 #include <cassert>
-#include <cstddef>
-#include <cstdint>
-#include <limits>
-#include <numeric>
 
-namespace cnt {
+#include "prefetcher/int.hpp"
 
-template <int16_t Min, int16_t Max>
+template <i16 Min, i16 Max>
 class saturating_counter {
    public:
-    using value_type = int16_t;
+    using value_type = i16;
 
    private:
     value_type m_value;
@@ -40,6 +38,7 @@ class saturating_counter {
     }
 
    public:
+    saturating_counter() noexcept : m_value(Min) {}
     saturating_counter(value_type value) noexcept : m_value(value) {
         assert(sat(m_value) == value);
     }
@@ -76,5 +75,3 @@ class saturating_counter {
         return old;
     }
 };
-
-};  // namespace cnt

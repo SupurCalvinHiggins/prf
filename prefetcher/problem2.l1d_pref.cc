@@ -1,25 +1,9 @@
-#include <algorithm>
-#include <array>
 #include <cstdint>
-#include <queue>
-#include <unordered_map>
-#include <unordered_set>
 
 #include "cache.h"
 #include "champsim.h"
-#include "saturating_counter.h"
-
-using namespace cnt;
-
-using u8 = uint8_t;
-using u16 = uint16_t;
-using u32 = uint32_t;
-using u64 = uint64_t;
-
-using i8 = int8_t;
-using i16 = int16_t;
-using i32 = int32_t;
-using i64 = int64_t;
+#include "prefetcher/candidates.hpp"
+#include "prefetcher/streams.hpp"
 
 // Idea: Do not prefetch writes. We want to focus on minimizing load misses
 // writes are buffered.
@@ -85,319 +69,6 @@ using i64 = int64_t;
 // if the filled address was prefetched. Otherwise, set the bit to 0. The number
 // of demand misses is the total number of 1s.
 
-// When timeliness is below this value, increase distance.
-#define TIMELINESS_BOOST_THRESHOLD 0.4
-
-// When accuracy is above this value, increase degree.
-#define ACCURACY_BOOST_THRESHOLD 0.8
-// When accuracy is below this value, decrease degree and distance.
-#define ACCURACY_THROTTLE_THRESHOLD 0.4
-
-template <typename T>
-class Optional {
-    T m_value;
-    bool m_has_value;
-
-   public:
-    Optional(T&& value) : m_value(value), m_has_value(true) {}
-    Optional() : m_has_value(false) {}
-    bool has_value() const { return m_has_value; }
-    T value() const {
-        assert(has_value());
-        return m_value;
-    }
-};
-
-struct Hint {
-    u64 cache_line;
-    bool direction;
-    bool useful;
-
-    Hint(u64 cache_line, bool direction, bool useful)
-        : cache_line(cache_line), direction(direction), useful(useful) {}
-};
-
-template <std::size_t N>
-class Streams {
-    using Stream = std::size_t;
-
-    struct Issue {
-        u64 cache_line;
-        Optional<Stream> stream;
-    };
-
-    class IssueQueue {
-        std::unordered_map<u64, Issue> m_issued;
-        std::queue<u64> m_issued_queue;
-
-       public:
-        // TODO: this
-        void push(u64 cache_line, Stream stream) {}
-        Optional<Stream> find(u64 cache_line) {}
-        void invalidate(Stream stream) {
-            for (auto& [_, issue] : m_issued)
-                if (issue.stream == stream) issue.stream = {};
-        }
-    };
-
-    // Stream eviction.
-    std::array<saturating_counter<0, 3>, N>
-        m_useful;  // Usefulness of the stream. Incremented for each period
-                   // where the stream is useful. Decrement otherwise.
-
-    std::array<bool, N> m_allocated;  // Whether the stream is allocated.
-
-    // Stream state.
-    std::array<u64, N> m_last_cache_line;  // Last cache line.
-    std::array<bool, N> m_direction;  // Whether the stream has increasing cache
-                                      // line addresses or decreasing. Used to
-                                      // prefetch in the correct direction.
-
-    // Stream throttling.
-    std::array<saturating_counter<0, 2>, N>
-        m_distance;  // Prefetcher distance. Real values are 4, 16, and 64
-    std::array<saturating_counter<0, 2>, N>
-        m_degree;  // Prefetcher degree. Real values are 1, 2 and 4.
-
-    // TODO: Comment.
-    IssueQueue m_issued;
-
-    std::array<saturating_counter<0, 511>, N>
-        m_num_issued;  // Number of prefetches issued by
-                       // stream within a time interval.
-    std::array<saturating_counter<0, 511>, N>
-        m_num_useful;  // Number of useful prefetches issued by stream within a
-                       // time interval. A prefetch is useful if the prefetched
-                       // line is accessed in cache regardless of whether the
-                       // prefetched line has made it to cache.
-
-    std::array<saturating_counter<0, 511>, N>
-        m_num_timely;  // Number of timely prefetches issued by stream within a
-                       // time interval. A prefetch is timely if the prefetch
-                       // line is a cache hit.
-
-    // TODO: Comment.
-    saturating_counter<0, 511> m_num_access{0};
-
-    // mark a stream as deallocated
-    void deallocate(Stream stream) {
-        m_allocated[stream] = false;
-        m_issued.invalidate(stream);
-    }
-
-    // allocate a stream with cache line and direction
-    Stream allocate(u64 cache_line, bool direction) {
-        Stream stream;
-        auto it = std::find(m_allocated.begin(), m_allocated.end(), 0);
-        if (it != m_allocated.end()) {
-            stream = std::distance(m_distance.begin(), it);
-        } else {
-            // TODO: Randomize index.
-            auto deallocate_it =
-                std::min_element(m_useful.begin(), m_useful.end());
-            stream = std::distance(m_useful.begin(), deallocate_it);
-            deallocate(stream);
-        }
-
-        assert(!m_allocated[stream]);
-        m_useful[stream] = 0;
-        m_allocated[stream] = 0;
-        m_useful[stream] = 1;
-        m_last_cache_line[stream] = 0;
-        m_direction[stream] = direction;
-        m_distance[stream] = 0;
-        m_degree[stream] = 0;
-        m_last_cache_line[stream] = cache_line;
-        m_num_issued[stream] = 0;
-        m_num_useful[stream] = 0;
-        m_num_timely[stream] = 0;
-
-        return stream;
-    }
-
-    // find a stream with cache line and direction, allocating if needed
-    Stream find_or_allocate(u64 cache_line, bool direction) {
-        auto stream = m_issued.find(cache_line);
-        if (stream.has_value() && m_allocated[stream.value()] &&
-            m_direction[stream.value()] == direction)
-            return stream.value();
-        return allocate(cache_line, direction);
-    }
-
-    // issue prefetches from stream TODO
-    void prefetch(Stream stream, u64 cache_line) {
-        auto distance = 1 << (2 * (m_distance[stream] + 1));
-        auto degree = 1 << m_degree[stream];
-        auto direction = m_direction[stream] ? 1 : -1;
-
-        for (int i = 1; i <= degree; ++i) {
-            u64 pf_cache_line = cache_line + (distance + i) * direction;
-            if (m_issued.find(pf_cache_line).has_value()) continue;
-
-            prefetch_line(ip, addr, pf_cache_line << LOG2_BLOCK_SIZE, FILL_L1,
-                          0);
-
-            m_issued.push(cache_line, stream);
-            ++m_num_issued[stream];
-            m_last_cache_line[stream] = pf_cache_line;
-        }
-    }
-
-   public:
-    // Issue prefetches from stream.
-    // returns true iff stream issued prefetches
-    bool prefetch(u64 cache_line) {
-        auto stream = m_issued.find(cache_line);
-        if (!stream.has_value()) return false;
-        ++m_num_useful[stream.value()];
-        prefetch(stream.value(), cache_line);
-        return true;
-    }
-
-    // allocate a new stream based on hint
-    void allocate_and_prefetch(u64 cache_line, bool direction) {
-        auto stream = find_or_allocate(cache_line, direction);
-        prefetch(stream, cache_line);
-    }
-
-    void train() {
-        ++m_num_access;
-        if (m_num_access != m_num_access.max()) return;
-
-        m_num_access = 0;
-        for (Stream stream = 0; stream < N; ++stream) {
-            auto& num_useful = m_num_useful[stream];
-            auto& num_timely = m_num_timely[stream];
-            auto& num_issued = m_num_issued[stream];
-            double timeliness =
-                num_useful != 0 ? (double)num_timely / num_useful : 0.0;
-            double accuracy =
-                num_issued != 0 ? (double)num_useful / num_issued : 0.0;
-
-            if (timeliness <= TIMELINESS_BOOST_THRESHOLD) ++m_distance[stream];
-
-            if (accuracy <= ACCURACY_THROTTLE_THRESHOLD) {
-                --m_degree[stream];
-                --m_distance[stream];
-            } else if (accuracy >= ACCURACY_BOOST_THRESHOLD) {
-                ++m_degree[stream];
-            }
-
-            if (accuracy >= ACCURACY_THROTTLE_THRESHOLD &&
-                num_useful >= m_num_access.max() / (2 * N)) {
-                ++m_useful[stream];
-            } else {
-                --m_useful[stream];
-            }
-
-            // TODO: Should we use the issue queue to maintain these?
-            num_useful = 0;
-            num_timely = 0;
-            num_issued = 0;
-        }
-    }
-};
-
-template <std::size_t N>
-class Candidates {
-    using Candidate = std::size_t;
-
-    // Candidate eviction.
-    std::array<bool, N> m_lru;
-    std::array<bool, N> m_allocated;  // Whether the candidate is allocated.
-
-    // Candidate state.
-    std::array<u64, N> m_cache_line;  // Current cache line.
-    std::array<bool, N>
-        m_direction;  // Direction of nearby cache line accesses
-                      // relative to the first cache line (within
-                      // +-16 cache lines).
-    std::array<saturating_counter<0, 3>, N>
-        m_num_correct;  // Number of times the direction has been correct.
-
-    Optional<Candidate> find(u64 cache_line) {
-        for (Candidate candidate = 0; candidate < N; ++candidate)
-            if ((m_allocated[candidate] &&
-                 m_cache_line[candidate] != cache_line &&
-                 m_cache_line[candidate] - 16 <= cache_line &&
-                 cache_line <= m_cache_line[candidate] + 16))
-                return candidate;
-        return {};
-    }
-
-    void deallocate(Candidate candidate) { m_allocated[candidate] = false; }
-
-    Candidate allocate(u64 cache_line) {
-        Candidate candidate;
-        auto it = std::find(m_allocated.begin(), m_allocated.end(), 0);
-        if (it != m_allocated.end()) {
-            candidate = std::distance(m_allocated.begin(), it);
-        } else {
-            // TODO: Randomize eviction.
-            auto deallocate_it = std::find(m_lru.begin(), m_lru.end(), 0);
-            if (deallocate_it != m_lru.end()) {
-                candidate = std::distance(m_lru.begin(), deallocate_it);
-            } else {
-                std::fill(m_lru.begin(), m_lru.end(), 0);
-                candidate = std::rand() % N;
-            }
-            m_allocated[candidate] = false;
-        }
-
-        assert(m_allocated[candidate] == false);
-        m_allocated[candidate] = true;
-        m_lru[candidate] = true;
-        m_cache_line[candidate] = cache_line;
-        m_num_correct[candidate] = 0;
-        m_direction[candidate] = 0;
-
-        return candidate;
-    }
-
-    Candidate find_or_allocate(u64 cache_line) {
-        auto candidate = find(cache_line);
-        if (candidate.has_value()) return candidate.value();
-        return allocate(cache_line);
-    }
-
-    void train(Candidate candidate, u64 cache_line) {
-        // Touch the candidate
-        m_lru[candidate] = true;
-
-        // Compute the direction.
-        bool direction = cache_line > m_cache_line[candidate];
-
-        // If the candidate has no learned direction, set it.
-        if (m_num_correct[candidate] == 0) m_direction[candidate] = direction;
-
-        // TODO: this is not the right place for this
-        // If the direction does not match the learned direction,
-        // reallocate the candidate.
-        if (m_direction[candidate] != direction) {
-            deallocate(candidate);
-            allocate(cache_line);
-            return;
-        }
-
-        // Otherwise, the direction matches the learned direction.
-        ++m_num_correct[candidate];
-    }
-
-   public:
-    // train candidate on cache line, return prefetch hint. if hint is strong,
-    // deallocate candidiate
-    Hint train(u64 cache_line) {
-        auto candidate = find_or_allocate(cache_line);
-        train(candidate, cache_line);
-        bool useful =
-            m_num_correct[candidate] == m_num_correct[candidate].max();
-        auto hint =
-            Hint(m_cache_line[candidate], m_direction[candidate], useful);
-        if (useful) deallocate(candidate);
-        return hint;
-    }
-};
-
 Streams<32> streams;
 Candidates<32> candidates;
 
@@ -420,28 +91,34 @@ void CACHE::l1d_prefetcher_operate(uint64_t addr, uint64_t ip,
 
     // If there is a stream that prefetched the cache line already, update
     // the stream metrics and issue additional prefetches from the stream.
-    auto is_prefetch = streams.prefetch(cache_line);
-    if (is_prefetch) goto monitor;
-
-    // If there is an IP-based candidate that can train on the cache line,
-    // train it. If the candidate is fully trained, promote it to a full
-    // stream, update the stream and issue additional prefetches from the
-    // stream.
-    // TODO:
-
-    // If there is a candidate that can train on the cache line, train it.
-    // If the candiate is fully trained, promote it to a full stream, update
-    // the stream and issue additional prefetches from the stream. auto
-    auto hint = candidates.train(cache_line);
-    if (hint.useful) {
-        streams.allocate_and_prefetch(hint.cache_line, hint.direction);
-    } else {
-        auto direction = hint.direction ? 1 : -1;
-        auto pf_cache_line = cache_line + 16 * direction;
+    auto pf_cache_lines = streams.prefetch(cache_line);
+    for (auto pf_cache_line : pf_cache_lines)
         prefetch_line(ip, addr, pf_cache_line << LOG2_BLOCK_SIZE, FILL_L1, 0);
+    if (pf_cache_lines.empty()) {
+        // If there is an IP-based candidate that can train on the cache line,
+        // train it. If the candidate is fully trained, promote it to a full
+        // stream, update the stream and issue additional prefetches from the
+        // stream.
+        // TODO:
+
+        // If there is a candidate that can train on the cache line, train it.
+        // If the candiate is fully trained, promote it to a full stream, update
+        // the stream and issue additional prefetches from the stream. auto
+        auto hint = candidates.train(cache_line);
+        if (hint.useful) {
+            auto pf_cache_lines =
+                streams.allocate_and_prefetch(hint.cache_line, hint.direction);
+            for (auto pf_cache_line : pf_cache_lines)
+                prefetch_line(ip, addr, pf_cache_line << LOG2_BLOCK_SIZE,
+                              FILL_L1, 0);
+        } else {
+            auto direction = hint.direction ? 1 : -1;
+            auto pf_cache_line = cache_line + 16 * direction;
+            prefetch_line(ip, addr, pf_cache_line << LOG2_BLOCK_SIZE, FILL_L1,
+                          0);
+        }
     }
 
-monitor:
     // If the monitoring period is over, update the streams.
     streams.train();
 }
@@ -454,7 +131,8 @@ monitor:
 void CACHE::l1d_prefetcher_cache_fill(uint64_t addr, uint32_t set, uint32_t way,
                                       uint8_t prefetch, uint64_t evicted_addr,
                                       uint32_t metadata_in) {
-    // TODO: need to mark cache line as timely
+    u64 cache_line = addr >> LOG2_BLOCK_SIZE;
+    if (prefetch) streams.fill(cache_line);
 }
 
 void CACHE::l1d_prefetcher_final_stats() {
