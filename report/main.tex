@@ -1,0 +1,100 @@
+\documentclass{article}
+
+\usepackage{float}
+\usepackage{booktabs}
+\usepackage{biblatex}
+
+\addbibresource{ref.bib}
+
+\title{ELE 548: L1 Data Prefetchers}
+\author{Calvin Higgins}
+
+\begin{document}
+
+\maketitle
+
+\section{Problem 1}
+
+\subsection{Adaptive Next Line Prefetcher}
+
+\subsubsection{Design}
+
+TODO
+% explain design
+
+\subsubsection{Hardware Cost}
+
+TODO
+% analyze hardware cost
+
+\subsubsection{Results}
+
+TODO
+% compare 3 thresholds, next line, and no prefetching
+
+\section{Problem 2}
+
+\subsection{Cache Line Stream Prefetcher}
+
+\subsubsection{Design}
+
+TODO
+% design
+
+\subsubsection{Hardware Cost}
+
+TODO
+% analyze hardware cost
+
+\subsubsection{Results}
+
+TODO
+% compare against next line, best of problem 1, and no prefetching
+
+% \begin{table}[htbp]
+% \centering
+% \small
+% \begin{tabular}{lccccccc}
+% \toprule
+% \textbf{Benchmark} & \textbf{P1A} & \textbf{P1B} & \textbf{TP} & \textbf{SD} & \textbf{BRL} & \textbf{P2} & \textbf{SHIP++} \\
+% \midrule
+% perlbench & 1.0052 & 1.0052 & 1.0052 & 1.0053 & 1.0000 & \textbf{1.0053} & \textit{1.0026} \\
+% bzip2 & 1.0009 & 1.0010 & 1.0010 & 1.0000 & \textbf{0.9943} & 0.9931 & \textit{0.9988} \\
+% gcc & 1.0163 & 1.0167 & 1.0163 & 1.0151 & 1.0104 & \textbf{1.0143} & \textit{1.0422} \\
+% bwaves & 1.0000 & 1.0000 & 1.0000 & 1.0000 & \textbf{1.0000} & \textbf{1.0000} & \textit{1.0000} \\
+% gamess & 0.9998 & 0.9998 & 0.9998 & 0.9995 & \textbf{1.0000} & 0.9998 & \textit{1.0000} \\
+% mcf & 1.0727 & 1.0727 & 1.0727 & 1.1243 & 0.9924 & \textbf{1.0779} & \textit{1.1491} \\
+% milc & 1.0022 & 1.0022 & 1.0022 & 1.0019 & 0.9915 & \textbf{0.9937} & \textit{1.0042} \\
+% zeusmp & 0.9151 & 0.9151 & 0.9150 & 0.9134 & \textbf{0.9840} & 0.9148 & \textit{1.0015} \\
+% gromacs & 1.0085 & 1.0085 & 1.0084 & 1.0069 & 0.9908 & \textbf{1.0040} & \textit{0.9958} \\
+% cactusADM & 1.0368 & 1.0367 & 1.0368 & 1.0084 & 1.0021 & \textbf{1.0309} & \textit{1.0563} \\
+% leslie3d & 1.0196 & 1.0195 & 1.0196 & 1.0298 & 0.9965 & \textbf{1.0139} & \textit{1.0612} \\
+% namd & 0.9941 & 0.9941 & 0.9941 & 0.9938 & \textbf{1.0000} & 0.9942 & \textit{1.0000} \\
+% gobmk & 0.9934 & 0.9970 & 0.9934 & 0.9930 & \textbf{0.9985} & 0.9949 & \textit{1.0000} \\
+% dealII & 0.9643 & 0.9742 & 0.9643 & 0.9611 & \textbf{1.0000} & 0.9766 & \textit{1.0000} \\
+% soplex & 1.0182 & 1.0182 & 1.0182 & 1.0180 & 0.9986 & \textbf{1.0164} & \textit{1.0133} \\
+% povray & 1.0000 & 1.0000 & 1.0000 & 1.0000 & \textbf{1.0000} & \textbf{1.0000} & \textit{1.0000} \\
+% hmmer & 1.0002 & 1.0002 & 1.0002 & 0.9979 & 1.0002 & \textbf{1.0003} & \textit{1.0005} \\
+% sjeng & 1.0000 & 1.0000 & 1.0000 & 0.9984 & \textbf{0.9998} & 0.9997 & \textit{0.9997} \\
+% GemsFDTD & 1.0098 & 1.0098 & 1.0098 & 0.9902 & 0.9984 & \textbf{1.0075} & \textit{1.0256} \\
+% libquantum & 1.1042 & 1.1045 & 1.1042 & 1.0874 & 0.9509 & \textbf{1.0265} & \textit{1.0756} \\
+% h264ref & 1.0048 & 1.0050 & 1.0048 & 1.0032 & \textbf{1.0014} & 0.9998 & \textit{1.0079} \\
+% tonto & 0.9972 & 0.9976 & 0.9972 & 0.9968 & \textbf{1.0000} & 0.9981 & \textit{1.0000} \\
+% lbm & 1.0629 & 1.0628 & 1.0629 & 1.0877 & 0.9803 & \textbf{1.0573} & \textit{1.0913} \\
+% omnetpp & 1.0219 & 1.0219 & 1.0219 & 1.0211 & 0.9956 & \textbf{1.0135} & \textit{1.0159} \\
+% astar & 0.9867 & 0.9879 & 0.9866 & 0.9818 & \textbf{1.0025} & 0.9897 & \textit{1.0016} \\
+% wrf & 0.9979 & 0.9979 & 0.9979 & 0.9978 & \textbf{1.0000} & 0.9979 & \textit{1.0000} \\
+% sphinx3 & 1.0774 & 1.0879 & 1.0774 & 1.0761 & 0.9950 & \textbf{1.0823} & \textit{1.1254} \\
+% xalancbmk & 1.1057 & 1.1018 & 1.1056 & 1.1059 & 1.0325 & \textbf{1.1187} & \textit{1.1061} \\
+% \midrule
+% \textbf{Mean} & 1.0141 & 1.0149 & 1.0141 & 1.0139 & 0.9969 & \textbf{1.0108} & \textit{1.0268} \\
+% \bottomrule
+% \end{tabular}
+% \caption{IPC speedup relative to true LRU in the single core, no prefetcher configuration (\texttt{config1}). The custom policy with maximum IPC speedup within 
+% the 32KiB hardware budget is bolded. The reference policy is italicized. Mean is geometric mean.}
+% \label{tab:cache_comparison_config1}
+% \end{table}
+
+\printbibliography
+
+\end{document}

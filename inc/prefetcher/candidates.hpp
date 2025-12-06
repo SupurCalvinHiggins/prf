@@ -30,13 +30,12 @@ class Candidates {
         m_direction;  // Direction of nearby cache line accesses
                       // relative to the first cache line (within
                       // +-16 cache lines).
-    std::array<saturating_counter<0, 3>, N>
+    std::array<saturating_counter<0, 2>, N>
         m_num_correct;  // Number of times the direction has been correct.
 
     Optional<Candidate> find(u64 cache_line) {
         for (Candidate candidate = 0; candidate < N; ++candidate)
             if ((m_allocated[candidate] &&
-                 m_cache_line[candidate] != cache_line &&
                  m_cache_line[candidate] - 16 <= cache_line &&
                  cache_line <= m_cache_line[candidate] + 16))
                 return candidate;
@@ -82,8 +81,14 @@ class Candidates {
         // Touch the candidate
         m_lru[candidate] = true;
 
+        // Do nothing if there is no signal.
+        if (m_cache_line[candidate] == cache_line) return candidate;
+
         // Compute the direction.
         bool direction = cache_line > m_cache_line[candidate];
+
+        // Set the new cache line.
+        m_cache_line[candidate] = cache_line;
 
         // If the candidate has no learned direction, set it.
         if (m_num_correct[candidate] == 0) m_direction[candidate] = direction;

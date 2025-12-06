@@ -124,7 +124,7 @@ class Streams {
 
         assert(!m_allocated[stream]);
         m_useful[stream] = 0;
-        m_allocated[stream] = 0;
+        m_allocated[stream] = 1;
         m_useful[stream] = 1;
         m_last_cache_line[stream] = 0;
         m_direction[stream] = direction;
@@ -140,6 +140,7 @@ class Streams {
 
     // find a stream with cache line and direction, allocating if needed
     Stream find_or_allocate(u64 cache_line, bool direction) {
+        // TODO: find by last cache line and direction, not by issues
         auto stream = m_issued.find(cache_line);
         if (stream.has_value() && m_allocated[stream.value()] &&
             m_direction[stream.value()] == direction)
@@ -159,7 +160,7 @@ class Streams {
             u64 pf_cache_line = cache_line + (distance + i) * direction;
             if (m_issued.find(pf_cache_line).has_value()) continue;
             pf_cache_lines.push_back(pf_cache_line);
-            m_issued.push(cache_line, stream);
+            m_issued.push(pf_cache_line, stream);
             ++m_num_issued[stream];
             m_last_cache_line[stream] = pf_cache_line;
         }
@@ -171,6 +172,7 @@ class Streams {
     // Issue prefetches from stream.
     // returns true iff stream issued prefetches
     [[nodiscard]] std::vector<u64> prefetch(u64 cache_line) {
+        // TODO: same here
         auto stream = m_issued.find(cache_line);
         if (!stream.has_value()) return {};
         ++m_num_useful[stream.value()];
@@ -216,6 +218,7 @@ class Streams {
             }
 
             // TODO: Should we use the issue queue to maintain these?
+            // TODO: use moving average
             num_useful = 0;
             num_timely = 0;
             num_issued = 0;
