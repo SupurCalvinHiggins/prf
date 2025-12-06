@@ -1,6 +1,6 @@
 #include <cstdint>
 #include <queue>
-#include <unordered_set>
+#include <unordered_multiset>
 
 #include "cache.h"
 #include "saturating_counter.h"
@@ -9,12 +9,12 @@ using namespace cnt;
 
 #define ISSUED_QUEUE_SIZE 128
 
-// The prefetcher distance. The cache line offset is computed as floor(2^{d-1}).
-saturating_counter<0, 7> m_distance{0};
+// The prefetcher distance. The cache line offset is computed as 2^d.
+saturating_counter<0, 3> m_distance{0};
 
 // A queue of recently issued prefetches. Used to determine if a prefetch was
 // useful.
-std::unordered_set<uint16_t> m_issued;
+std::unordered_multiset<uint16_t> m_issued;
 std::queue<uint16_t> m_issued_queue;
 
 // Number of useful prefetches within a given interval. A prefetch is useful if
@@ -63,7 +63,7 @@ void CACHE::l1d_prefetcher_operate(uint64_t addr, uint64_t ip,
     m_issued.insert(pf_cache_line);
     m_issued_queue.push(pf_cache_line);
     if (m_issued_queue.size() > ISSUED_QUEUE_SIZE) {
-        m_issued.erase(m_issued_queue.front());
+        m_issued.erase(m_issued.find(m_issued_queue.front()));
         m_issued_queue.pop();
     }
 
