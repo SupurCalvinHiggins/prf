@@ -3,9 +3,7 @@
 #include <unordered_multiset>
 
 #include "cache.h"
-#include "prefetcher/saturating_counter.h"
-
-using namespace cnt;
+#include "prefetcher/saturating_counter.hpp"
 
 #define ISSUED_QUEUE_SIZE 128
 
