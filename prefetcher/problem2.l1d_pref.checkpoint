@@ -70,7 +70,7 @@
 // of demand misses is the total number of 1s.
 
 Streams<32> streams;
-Candidates<128> candidates;
+Candidates<32> candidates;
 
 void CACHE::l1d_prefetcher_initialize() {
     cout << "CPU " << cpu << " L1D next line prefetcher" << endl;
@@ -108,13 +108,12 @@ void CACHE::l1d_prefetcher_operate(uint64_t addr, uint64_t ip,
         if (hint.useful) {
             auto pf_cache_lines =
                 streams.allocate_and_prefetch(hint.cache_line, hint.direction);
-            assert(!pf_cache_lines.empty());
             for (auto pf_cache_line : pf_cache_lines)
                 prefetch_line(ip, addr, pf_cache_line << LOG2_BLOCK_SIZE,
                               FILL_L1, 0);
         } else {
             auto direction = hint.direction ? 1 : -1;
-            auto pf_cache_line = cache_line + direction;
+            auto pf_cache_line = cache_line + 16 * direction;
             prefetch_line(ip, addr, pf_cache_line << LOG2_BLOCK_SIZE, FILL_L1,
                           0);
         }

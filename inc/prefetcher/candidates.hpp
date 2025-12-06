@@ -67,7 +67,7 @@ class Candidates {
         m_lru[candidate] = true;
         m_cache_line[candidate] = cache_line;
         m_num_correct[candidate] = 0;
-        m_direction[candidate] = 0;
+        m_direction[candidate] = 1;
 
         return candidate;
     }
@@ -108,8 +108,10 @@ class Candidates {
     Hint train(u64 cache_line) {
         auto candidate = find_or_allocate(cache_line);
         candidate = train(candidate, cache_line);
+        assert(m_allocated[candidate]);
         bool useful =
             m_num_correct[candidate] == m_num_correct[candidate].max();
+        // Note that direction defaults to forward.
         auto hint =
             Hint(m_cache_line[candidate], m_direction[candidate], useful);
         if (useful) deallocate(candidate);

@@ -78,7 +78,7 @@ class Streams {
 
     // Stream throttling.
     std::array<saturating_counter<0, 2>, N>
-        m_distance{};  // Prefetcher distance. Real values are 4, 16, and 64
+        m_distance{};  // Prefetcher distance. Real values are 1, 2, and 4
     std::array<saturating_counter<0, 2>, N>
         m_degree{};  // Prefetcher degree. Real values are 1, 2 and 4.
 
@@ -151,7 +151,7 @@ class Streams {
     std::vector<u64> prefetch(Stream stream, u64 cache_line) {
         std::vector<u64> pf_cache_lines;
 
-        auto distance = 1 << (2 * (m_distance[stream] + 1));
+        auto distance = 1 << m_distance[stream];
         auto degree = 1 << m_degree[stream];
         auto direction = m_direction[stream] ? 1 : -1;
 
