@@ -1,6 +1,6 @@
 #include <cstdint>
 #include <queue>
-#include <unordered_multiset>
+#include <unordered_set>
 
 #include "cache.h"
 #include "prefetcher/saturating_counter.hpp"
